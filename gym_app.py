@@ -1,22 +1,13 @@
 import streamlit as st
-import mysql.connector
+import sqlite3
 import pandas as pd
 
 # Database connection details
-DB_HOST = "localhost"
-DB_USER = "root"
-DB_PASSWORD = "Minushbest#0"
-DB_NAME = "gym_database"
+DB_PATH = 'gym_database.db'
 
 # Connect to the database
 def get_db_connection():
-    conn = mysql.connector.connect(
-        host=DB_HOST,
-        port='3307',
-        user=DB_USER,
-        password=DB_PASSWORD,
-        database=DB_NAME
-    )
+    conn = sqlite3.connect(DB_PATH)
     return conn
 
 def main():
@@ -43,10 +34,8 @@ def main():
 
     elif choice == "View Data":
         st.subheader("View Data")
-        table = st.selectbox("Select Table", ["staff", "inventory_table", "gym_equipment_table", 
-                                              "class_schedules", "training_programs", "members", 
-                                              "visitor_table", "attendance", "damage", "feedback", 
-                                              "booking", "payment", "class_attendance"])
+        table = st.selectbox("Select Table", ["staff", "members", "class_schedules", 
+                                              "training_programs", "booking"])
 
         query = f"SELECT * FROM {table};"
         df = pd.read_sql_query(query, conn)
@@ -61,7 +50,7 @@ def main():
 
         if st.button("Check Role"):
             with conn.cursor() as cursor:
-                query = "SELECT position FROM staff WHERE staffID = %s;"
+                query = "SELECT position FROM staff WHERE staffID = ?;"
                 cursor.execute(query, (current_user_id,))
                 result = cursor.fetchone()
                 if result:
@@ -85,10 +74,11 @@ def main():
             if st.button("Add Member"):
                 with conn.cursor() as cursor:
                     query = """
-                    CALL insert_member(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                    INSERT INTO members (memberID, programID, last_name, first_name, mtype_price, start_date, end_date, contact_information, membership_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """
                     try:
-                        cursor.execute(query, (memberID, programID, last_name, first_name, mtype_price, start_date, end_date, contact_information, membership_type, current_user_id))
+                        cursor.execute(query, (memberID, programID, last_name, first_name, mtype_price, start_date, end_date, contact_information, membership_type))
                         conn.commit()
                         st.success("Member added successfully!")
                     except Exception as e:
@@ -117,10 +107,10 @@ def main():
 
                 if st.button("Update Member"):
                     with conn.cursor() as cursor:
-                        query = f"""
+                        query = """
                         UPDATE members
-                        SET last_name = %s, first_name = %s, mtype_price = %s, start_date = %s, end_date = %s, contact_information = %s, membership_type = %s
-                        WHERE memberID = %s;
+                        SET last_name = ?, first_name = ?, mtype_price = ?, start_date = ?, end_date = ?, contact_information = ?, membership_type = ?
+                        WHERE memberID = ?;
                         """
                         try:
                             cursor.execute(query, (new_last_name, new_first_name, new_mtype_price, new_start_date, new_end_date, new_contact_information, new_membership_type, memberID))
@@ -220,14 +210,12 @@ def main():
                         ')')
             ORDER BY members.first_name , members.last_name
             SEPARATOR ', ') AS members,
-            GROUP_CONCAT(staff.workers_name
-            ORDER BY staff.workers_name
-            SEPARATOR ', ') AS tutors
+            GROUP_CONCAT(staff.workers_name ORDER BY staff.workers_name SEPARATOR ', ') AS trainers
         FROM booking
         JOIN members ON booking.memberID = members.memberID
-        JOIN class_schedules ON booking.staffID = class_schedules.staffID
+        JOIN staff ON booking.staffID = staff.staffID
+        JOIN class_schedules ON staff.staffID = class_schedules.staffID
         JOIN training_programs ON class_schedules.programID = training_programs.programID
-        JOIN staff ON class_schedules.staffID = staff.staffID
         GROUP BY training_programs.program_name;
         """
         df = pd.read_sql_query(query, conn)
@@ -237,15 +225,17 @@ def main():
         st.subheader("Equipment Damage Analysis")
 
         query = """
-        SELECT
-            DATE_FORMAT(d.damage_date, '%Y-%m') as month,
-            i.item_name,
-            COUNT(d.damageID) as damage_count,
-            SUM(d.cost) as total_cost
-        FROM inventory_table i
-        JOIN damage d on i.inventoryID = d.inventoryID
-        GROUP BY month, i.item_name
-        ORDER BY month, damage_count DESC;
+        SELECT 
+            equipment.equipment_name,
+            COUNT(damage.damageID) AS Total_Damages,
+            SUM(damage.repair_cost) AS Total_Cost,
+            CASE 
+                WHEN damage.damage_reported_by = 'member' THEN 'Reported by Member'
+                ELSE 'Reported by Staff'
+            END AS Reported_By
+        FROM damage
+        JOIN equipment ON damage.equipmentID = equipment.equipmentID
+        GROUP BY equipment.equipment_name, damage.damage_reported_by;
         """
         df = pd.read_sql_query(query, conn)
         st.write(df)
@@ -254,56 +244,21 @@ def main():
         st.subheader("Member Payment and Damage Balances")
 
         query = """
-        SELECT
+        SELECT 
             m.memberID,
             m.first_name,
             m.last_name,
-            m.mtype_price AS membership_price,
-            COALESCE(SUM(p.amount), 0) AS total_payments,
-            m.mtype_price - COALESCE(SUM(p.amount), 0) AS outstanding_membership_balance,
-            COALESCE(SUM(d.cost), 0) AS total_damage_cost,
-            COALESCE(SUM(d.cost), 0) - COALESCE(SUM(pd.amount), 0) AS outstanding_damage_balance
-        FROM
+            p.amount as Payment,
+            d.repair_cost as Damage
+        FROM 
             members m
-        LEFT JOIN
-            payment p ON m.memberID = p.person_ID
-            AND p.reason_for_payment = 'Annual Membership Fee'
-        LEFT JOIN
-            damage d ON m.memberID = d.personID
-            AND d.person_type = 'member'
-        LEFT JOIN
-            payment pd ON d.damageID = pd.person_ID
-            AND pd.reason_for_payment = 'Equipment Damage'
-        GROUP BY
-            m.memberID, m.first_name, m.last_name, m.mtype_price
-        HAVING
-            (m.mtype_price - COALESCE(SUM(p.amount), 0)) > 0
-            OR (COALESCE(SUM(d.cost), 0) - COALESCE(SUM(pd.amount), 0)) > 0;
+        JOIN 
+            payment p on m.memberID = p.memberID
+        LEFT JOIN 
+            damage d on m.memberID = d.memberID;
         """
         df = pd.read_sql_query(query, conn)
         st.write(df)
-
-    # elif choice == "Attendance of All Present Individuals":
-    #     st.subheader("Attendance of All Present Individuals")
-
-    #     person_type = st.selectbox("Select Person Type", ["member", "staff"])
-
-    #     query = f"""
-    #     SELECT
-    #         CONCAT(m.first_name, ' ', m.last_name) AS person_name,
-    #         a.date,
-    #         a.arrival_time,
-    #         a.departure_time,
-    #         cs.class_name
-    #     FROM
-    #         attendance a
-    #     JOIN members m ON a.personID = m.memberID
-    #     # JOIN class_schedules cs ON a.classID = cs.classID
-    #     WHERE a.person_type = '{person_type}'
-    #     ORDER BY a.date, a.arrival_time, person_name;
-    #     """
-    #     df = pd.read_sql_query(query, conn)
-    #     st.write(df)
 
     conn.close()
 
